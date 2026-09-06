@@ -6,7 +6,7 @@
 
 > **Ringkasan sejujurnya:** pipa produksi hidup dan terbukti mereproduksi backtest sampai digit terakhir.
 > Tapi **grid robustness T8 gagal (16.7%, syarat 70%)**, jadi **tidak ada konfigurasi yang boleh disebut robust.**
-> Selama pembangunan ditemukan **9 bug**, semuanya di kode yang tesnya hijau, dan **tidak satu pun ditemukan oleh tes**.
+> Selama pembangunan ditemukan **10 bug**, semuanya di kode yang tesnya hijau, dan **tidak satu pun ditemukan oleh tes**.
 
 ---
 
@@ -298,7 +298,7 @@ sinyal terakhir   : 2025-10-26 (299 hari lalu)
 
 ---
 
-## 7. Sembilan bug — dan cara masing-masing ditemukan
+## 7. Sepuluh bug — dan cara masing-masing ditemukan
 
 **Tidak satu pun ditemukan oleh tes.** Semuanya muncul saat sesuatu dijalankan sungguhan, atau saat ditanya pertanyaan yang tepat.
 
@@ -313,6 +313,36 @@ sinyal terakhir   : 2025-10-26 (299 hari lalu)
 | 7 | Hijau palsu di CI tanpa secret | Gerbang 7 hari "lulus" tanpa kirim apa pun | Dew tanya soal trigger |
 | 8 | Error Sheets = 8.000 karakter HTML | Penyebab tenggelam di CSS | Run manual pertama |
 | 9 | **Cap eksposur portofolio tidak pernah diterapkan** | Disuruh beli **130.7% ekuitas** | Screenshot Telegram Dew |
+| 10 | **HTTP 503 Sheets tanpa coba-ulang, dan salah didiagnosis** | Baris shadow_log hilang permanen; waktu habis memeriksa share yang sudah benar | Pesan error Gsheet dari Dew |
+
+### Catatan bug #10 — gangguan beberapa detik, kerugian permanen
+
+Pesan yang muncul:
+
+```
+gagal tulis shadow_log: RuntimeError: tidak bisa membuka spreadsheet.
+APIError: [503]: The service is currently unavailable.
+  Email yang harus di-share: creypto-ver1@crypto-ver1.iam.gserviceaccount.com
+  SHEET_ID dipakai: 1jjiY1h-...QwE0 (44 karakter)
+```
+
+Dua cacat berbeda dalam satu pesan.
+
+**Cacat 1 — tidak ada coba-ulang.** HTTP **503** = *Service Unavailable*: backend Google sedang bermasalah, hilang dalam hitungan detik. `notify.py` sudah punya `MAX_RETRIES = 3` sejak awal; `sheets.py` tidak punya apa-apa. Satu kedipan cukup untuk membuang baris shadow_log hari itu — dan job besok menulis hari besok, tidak pernah menambal hari yang bolong. Untuk forward test yang dirancang berjalan bertahun-tahun, itu lubang permanen dari gangguan beberapa detik.
+
+**Cacat 2 — diagnosis salah arah.** `_client()` menerjemahkan **semua** kegagalan `open_by_key` jadi "belum di-share / SHEET_ID salah", lengkap dengan email service account dan panjang ID. Jadi gangguan di pihak Google terbaca seperti kesalahan konfigurasi, dan yang diperiksa adalah share dan ID yang sebenarnya sudah benar (44 karakter — memang sudah lolos `check_sheet_id`). Diagnosis yang salah arah lebih mahal daripada tidak ada diagnosis: ia mengarahkan pencarian ke tempat yang salah.
+
+Perbaikan di `src/sheets.py`:
+
+* `is_transient()` memisahkan **429/500/502/503/504** dan putus jaringan (boleh diulang) dari 401/403/404 dan JSON rusak (tidak boleh diulang — mengulangi salah konfigurasi cuma menunda pesan error).
+* `_retry()` membungkus **setiap** panggilan Sheets — buka spreadsheet, cari/buat worksheet, baca judul, tulis baris. 5 percobaan, jeda 2/4/8/16 detik + jitter, ~30 detik total; job punya jatah 15 menit, jadi menunggu tidak berbiaya.
+* Kalau tetap gagal, yang dilempar adalah `SheetsUnavailable`, bukan `RuntimeError` generik, dengan pesan yang menyatakan **"gangguan di sisi Google, BUKAN salah share/SHEET_ID"** — dan tanpa petunjuk konfigurasi yang menyesatkan itu.
+* `_diagnose()` memeriksa status sementara **paling awal**. Balasan 5xx bisa berbentuk halaman HTML, dan pola HTML-lah yang dulu menangkapnya duluan lalu melaporkannya sebagai "belum di-share".
+* Spreadsheet dibuka **sekali per proses** (cache `_BOOK`). Sebelumnya `append_shadow()` dan `append_run()` masing-masing autentikasi + `open_by_key` sendiri: dua kali kesempatan kena 503 untuk pekerjaan yang sama.
+
+Bonus yang ketahuan saat memperbaiki: `_worksheet()` dulu menangkap `Exception` apa pun sebelum memanggil `add_worksheet()`. Artinya satu 503 **saat mencari** sheet akan membuat job **membuat worksheet kedua bernama sama**, dan sejak hari itu baris harian terbelah dua tanpa ada yang sadar. Sekarang hanya `gspread.exceptions.WorksheetNotFound` yang boleh sampai ke sana.
+
+**Yang belum diperbaiki:** kalau 5 percobaan habis, baris hari itu tetap hilang — tidak ada mekanisme tambal-belakangan. Menambalnya butuh state di luar job (§ "job ini tanpa state"), jadi ditunda sampai ada bukti 503 sanggup bertahan lebih dari 30 detik.
 
 ### Catatan bug #4 — bukti dari riwayat repo sendiri
 
@@ -376,7 +406,7 @@ sanity_tests.py            18/18
 test_port_fidelity.py      PORT SETIA (+ cap eksposur)
 test_binance_data.py       13/13
 test_signal_equivalence.py SETARA (2.784 hari)
-test_daily_job.py          LOLOS (termasuk escape HTML)
+test_daily_job.py          LOLOS (termasuk escape HTML + coba-ulang 503)
 test_replay_v142.py        LOLOS
 gerbang                    nol TODO, §6.1 lengkap, nol kredensial ter-track
 ```
@@ -389,7 +419,7 @@ gerbang                    nol TODO, §6.1 lengkap, nol kredensial ter-track
 2. **Konfigurasi produksi gagal kriteria 2** — tidak pernah mengalahkan BTC buy-and-hold. Diterima sadar atas dasar risk-adjusted (§3.1).
 3. **Ekspektasi forward adalah mean R +0.151**, bukan +0.3182. Angka headline didominasi era 2019–2021.
 4. **90 hari menghasilkan ~11 trade.** Untuk mendeteksi edge +0.151 dengan t=2 dibutuhkan ~312 trade ≈ 6,8 tahun. **v1.4.4 adalah uji infrastruktur, bukan uji strategi.**
-5. **Bagian yang belum pernah dieksekusi masih berisiko.** Sembilan bug muncul dengan pola konsisten: yang belum pernah dijalankan, patah. Cron harian otomatis belum pernah jalan.
+5. **Bagian yang belum pernah dieksekusi masih berisiko.** Sepuluh bug muncul dengan pola konsisten: yang belum pernah dijalankan, patah. Cron harian otomatis belum pernah jalan.
 6. **Sisi short tidak pernah diuji.** TSMOM di literatur biasanya dua arah; V1.1–V1.3 hanya menguji sisi beli. Bukan ditolak — memang tidak pernah masuk registry.
 7. **Koreksi survivorship masih diblokir data.** Semua angka positif tetap batas atas.
 

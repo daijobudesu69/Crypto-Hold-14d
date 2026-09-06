@@ -158,5 +158,110 @@ cek("tag dibuang", "<b>" not in polos and "<i>" not in polos, repr(polos))
 cek("entitas dikembalikan ke bentuk asli", "&" in polos and "<BTC>" in polos)
 cek("send() mencoba dua format", 'for parse_mode in ("HTML", None)' in inspect.getsource(notify.send))
 
+print("\n=== 10. Google Sheets 503: dicoba ulang, dan didiagnosis dengan benar ===")
+# Kejadian nyata di produksi: satu HTTP 503 (server Google, hilang beberapa
+# detik) membuang baris shadow_log hari itu SELAMANYA, lalu dilaporkan sebagai
+# "spreadsheet belum di-share / SHEET_ID salah" — sehingga yang diperiksa adalah
+# konfigurasi yang sebenarnya sudah benar. Dua-duanya diuji di sini.
+sheets.BASE_DELAY = 0.0          # jangan biarkan tes ikut menunggu 30 detik
+
+
+class _Resp:
+    def __init__(self, code): self.status_code = code
+
+
+class _FakeAPIError(Exception):
+    """Bentuk gspread.APIError: pesan "[kode]: teks" + respons dengan status."""
+    def __init__(self, code, teks):
+        super().__init__(f"APIError: [{code}]: {teks}")
+        self.response = _Resp(code)
+
+
+E503 = _FakeAPIError(503, "The service is currently unavailable.")
+E403 = _FakeAPIError(403, "The caller does not have permission")
+E404 = _FakeAPIError(404, "Requested entity was not found.")
+
+cek("503 dikenali sementara", sheets.is_transient(E503))
+cek("429 dikenali sementara", sheets.is_transient(_FakeAPIError(429, "Quota exceeded")))
+cek("403 TIDAK dianggap sementara", not sheets.is_transient(E403))
+cek("404 TIDAK dianggap sementara", not sheets.is_transient(E404))
+# Tanpa objek respons, status masih terbaca dari teksnya.
+cek("status terbaca dari teks saja",
+    sheets.http_status(Exception("APIError: [503]: The service is currently unavailable.")) == 503)
+cek("timeout jaringan dianggap sementara",
+    sheets.is_transient(Exception("HTTPSConnectionPool: Read timed out.")))
+
+panggilan = {"n": 0}
+
+
+def _gagal_dua_kali():
+    panggilan["n"] += 1
+    if panggilan["n"] <= 2:
+        raise E503
+    return "berhasil"
+
+
+cek("503 dicoba ulang sampai berhasil",
+    sheets._retry("tes", _gagal_dua_kali) == "berhasil", f"{panggilan['n']} panggilan")
+
+panggilan["n"] = 0
+
+
+def _selalu_503():
+    panggilan["n"] += 1
+    raise E503
+
+
+try:
+    sheets._retry("tulis baris", _selalu_503)
+    cek("503 terus-menerus akhirnya menyerah", False, "tidak melempar apa-apa")
+except sheets.SheetsUnavailable as e:
+    cek("503 terus-menerus akhirnya menyerah", True)
+    cek("dicoba tepat MAX_ATTEMPTS kali", panggilan["n"] == sheets.MAX_ATTEMPTS,
+        f"{panggilan['n']} panggilan")
+    # Inti perbaikannya: pesan menyerah TIDAK BOLEH menuduh share/SHEET_ID.
+    pesan = str(e)
+    cek("pesan menyebut ini sisi Google", "sisi Google" in pesan)
+    cek("pesan tidak menuduh share/SHEET_ID salah",
+        "belum di-share" not in pesan and "SHEET_ID salah" not in pesan)
+except Exception as e:
+    cek("503 terus-menerus akhirnya menyerah", False, type(e).__name__)
+
+panggilan["n"] = 0
+
+
+def _403():
+    panggilan["n"] += 1
+    raise E403
+
+
+try:
+    sheets._retry("tes", _403)
+except sheets.SheetsUnavailable:
+    cek("salah izin tidak dicoba ulang", False, "malah jadi SheetsUnavailable")
+except Exception:
+    cek("salah izin dilempar apa adanya, tanpa coba ulang", panggilan["n"] == 1,
+        f"{panggilan['n']} panggilan")
+
+d503 = sheets._diagnose(E503, "x" * 44)
+cek("diagnosis 503 menyebut SEMENTARA", "SEMENTARA" in d503)
+cek("diagnosis 503 tidak menyuruh cek share",
+    "BELUM di-share" not in d503 and "SHEET_ID salah" not in d503, d503[:60])
+# 5xx dari frontend Google bisa datang sebagai halaman HTML. Kalau pola HTML
+# menang duluan, gangguan sementara kembali terbaca sebagai salah konfigurasi.
+d503_html = sheets._diagnose(
+    _FakeAPIError(503, "<!DOCTYPE html><html><body>Service unavailable</body></html>"),
+    "x" * 44)
+cek("503 berbentuk halaman HTML tetap didiagnosis sementara",
+    "SEMENTARA" in d503_html)
+cek("403 tetap didiagnosis sebagai izin", "EDITOR" in sheets._diagnose(E403, "x" * 44))
+
+src_sheets_now = inspect.getsource(sheets)
+cek("semua penulisan Sheets lewat _retry",
+    src_sheets_now.count("_retry(") >= 8,
+    f"{src_sheets_now.count('_retry(')} pemakaian")
+cek("worksheet hanya dibuat saat memang belum ada",
+    "except gspread.exceptions.WorksheetNotFound" in src_sheets_now)
+
 print("\n" + ("SEMUA TES JOB HARIAN LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)
