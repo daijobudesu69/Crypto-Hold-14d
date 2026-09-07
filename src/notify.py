@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 import os
 import re
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -28,6 +29,11 @@ import config_v14 as cfg
 API = "https://api.telegram.org/bot{token}/sendMessage"
 TIMEOUT = 20
 MAX_RETRIES = 3
+# Coba-ulang tanpa jeda bukan coba-ulang: tiga POST dalam sepersekian detik akan
+# menabrak gangguan yang sama persis, dan 429 Telegram justru diperparah. Jeda
+# 2 dan 4 detik; total terburuk ~12 detik untuk dua format, jauh di bawah jatah
+# 15 menit workflow.
+RETRY_BACKOFF = 2.0
 
 
 def credentials() -> tuple[str | None, str | None]:
@@ -78,6 +84,8 @@ def send(text: str) -> bool:
             except requests.RequestException as e:
                 print(f"  Telegram gagal kirim: {type(e).__name__} "
                       f"(format={parse_mode or 'polos'}, percobaan {attempt}/{MAX_RETRIES})")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF * 2 ** (attempt - 1))
     return False
 
 
