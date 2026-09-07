@@ -4,7 +4,7 @@
 # `workflow_dispatch`. JANGAN PERNAH menambahkan `pull_request_target` — itu
 # satu-satunya trigger yang menyerahkan secret kepada kode dari fork, dan repo
 # ini publik. `pull_request` biasa aman karena fork tidak menerima secret.
-name: Sinyal harian
+name: "Sinyal harian v1.4 — momentum 28/120, hold maks 14d"
 
 on:
   schedule:
