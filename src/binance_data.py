@@ -48,6 +48,8 @@ MAX_LIMIT = 1000
 REQUEST_TIMEOUT = 20
 PAGE_SLEEP = 0.3            # pacing sopan antar halaman
 MAX_RETRIES = 5
+# Ditolak di tingkat host, bukan permintaan yang salah: coba host berikutnya.
+HOST_BLOCKED = frozenset({401, 403, 451})
 
 
 def _ms(ts: str | pd.Timestamp) -> int:
@@ -65,6 +67,11 @@ def _get(session: requests.Session, params: dict) -> list:
         tidak terjangkau, lanjut ke host berikutnya. Inilah bentuk geo-blocking
         Binance: bukan HTTP 403, melainkan koneksi yang menggantung sampai
         timeout.
+      * Ditolak di TINGKAT HOST (401/403/451) -> lanjut ke host berikutnya.
+        Geo-blocking tidak selalu berbentuk koneksi menggantung; sebagian titik
+        keluar dibalas 451 "unavailable for legal reasons" secara langsung.
+        Kalau itu dilempar apa adanya, daftar host cadangan -- satu-satunya
+        alasan daftar ini ada -- tidak pernah terpakai.
       * Gagal HTTP dengan respons sah (400 simbol salah, dsb) -> LANGSUNG
         dilempar tanpa mencoba host lain. Permintaan yang salah akan sama
         salahnya di host mana pun; mencoba ulang cuma menyembunyikan bug.
@@ -86,8 +93,15 @@ def _get(session: requests.Session, params: dict) -> list:
                     break
                 time.sleep(2 * attempt)
                 continue
+            if r.status_code in HOST_BLOCKED:
+                kegagalan.append(f"{host.split('/')[2]}: HTTP {r.status_code} (host ini menolak)")
+                break                      # diblokir di sini -> host berikutnya
             r.raise_for_status()           # permintaan salah: jangan pura-pura pulih
-    raise RuntimeError("semua host data Binance gagal -> " + "; ".join(kegagalan))
+            # Status non-200 yang tidak dilempar raise_for_status (3xx, 204):
+            # jangan diam-diam mengulang sampai habis lalu melapor tanpa sebab.
+            raise RuntimeError(f"{host.split('/')[2]}: HTTP {r.status_code} tak terduga")
+    raise RuntimeError("semua host data Binance gagal -> " +
+                       ("; ".join(kegagalan) if kegagalan else "tanpa sebab tercatat"))
 
 
 def fetch_klines(symbol: str, start: str, end: str,

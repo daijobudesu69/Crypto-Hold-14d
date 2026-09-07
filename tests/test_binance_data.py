@@ -69,5 +69,75 @@ cek("kolom OHLCV lengkap", list(d3.columns) == bd.OHLCV_COLS, str(list(d3.column
 cek("semua bertipe float", all(str(t) == "float64" for t in d3.dtypes))
 cek("index bertimezone UTC", str(d3.index.tz) == "UTC")
 
+print()
+print("=== 6. Ditolak di satu host -> pindah host, bukan mati ===")
+# Bug #4 di catatan pembangunan: geo-block Binance datang sebagai HTTP 451,
+# bukan koneksi menggantung. Daftar host cadangan ada PERSIS untuk itu, tapi 451
+# dulu jatuh ke raise_for_status() sehingga host kedua tidak pernah dicoba --
+# daftar cadangannya jadi hiasan. Diuji tanpa menyentuh jaringan.
+import requests
+
+
+class _R:
+    def __init__(self, code, data=None):
+        self.status_code, self._d = code, data
+
+    def json(self):
+        return self._d
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
+class _Sesi:
+    """Balas menurut host: {nama_host: kode}. Mencatat urutan host yang dicoba."""
+
+    def __init__(self, peta):
+        self.peta, self.dicoba = peta, []
+
+    def get(self, url, params=None, timeout=None):
+        host = url.split("/")[2]
+        self.dicoba.append(host)
+        kode = self.peta[host]
+        if isinstance(kode, Exception):
+            raise kode
+        return _R(kode, [["x"]] if kode == 200 else None)
+
+
+H = [h.split("/")[2] for h in cfg.BINANCE_KLINES_HOSTS]
+
+sesi = _Sesi({H[0]: 451, H[1]: 200, H[2]: 200})
+try:
+    hasil = bd._get(sesi, {"symbol": "BTCUSDT"})
+    cek("HTTP 451 di host pertama -> lanjut ke host berikutnya",
+        hasil == [["x"]] and sesi.dicoba == [H[0], H[1]], str(sesi.dicoba))
+except Exception as e:
+    cek("HTTP 451 di host pertama -> lanjut ke host berikutnya", False,
+        f"{type(e).__name__}: {e}")
+
+sesi = _Sesi({H[0]: 403, H[1]: requests.ConnectTimeout("geo-block diam"), H[2]: 200})
+try:
+    bd._get(sesi, {"symbol": "BTCUSDT"})
+    cek("403 lalu timeout -> tetap sampai host ketiga", sesi.dicoba == H, str(sesi.dicoba))
+except Exception as e:
+    cek("403 lalu timeout -> tetap sampai host ketiga", False, f"{type(e).__name__}: {e}")
+
+sesi = _Sesi({H[0]: 400, H[1]: 200, H[2]: 200})
+try:
+    bd._get(sesi, {"symbol": "SALAH"})
+    cek("permintaan salah (400) dilempar, TIDAK pindah host", False, "malah lolos")
+except requests.HTTPError:
+    cek("permintaan salah (400) dilempar, TIDAK pindah host", sesi.dicoba == [H[0]],
+        str(sesi.dicoba))
+
+sesi = _Sesi({h: 451 for h in H})
+try:
+    bd._get(sesi, {"symbol": "BTCUSDT"})
+    cek("semua host menolak -> RuntimeError yang menyebut sebabnya", False, "malah lolos")
+except RuntimeError as e:
+    cek("semua host menolak -> RuntimeError yang menyebut sebabnya",
+        "451" in str(e) and all(h in str(e) for h in H), str(e)[:80])
+
 print("\n" + ("SEMUA TES PENGAMBIL DATA LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)
