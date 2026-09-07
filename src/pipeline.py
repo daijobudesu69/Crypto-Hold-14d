@@ -29,6 +29,78 @@ def build_trades(raw: dict[str, pd.DataFrame], start: str | None = None,
     return engine.run(panel, regime, c)
 
 
+SENTINEL_OPEN_COLS = ("open", "high", "low", "volume", "quote_volume")
+
+
+def append_sentinel_day(raw: dict[str, pd.DataFrame], data_through: pd.Timestamp):
+    """Tambahkan SATU baris penanda sesudah lilin tertutup terakhir. -> (raw, tanggal)
+
+    KENAPA INI HARUS ADA (bug terbesar v1.4.3).
+
+    engine.run() mengiterasi `dates[:-1]`, karena hari terakhir tidak punya baris
+    hari-berikutnya untuk harga eksekusi. Akibatnya hari data terakhir TIDAK
+    PERNAH diurus barrier-nya: posisi yang kena SL/TP atau batas waktu di hari
+    itu tidak ditutup, melainkan ikut ditutup-paksa dengan reason="eod" -- dan
+    pipeline.still_open() membacanya sebagai "masih terbuka sekarang".
+
+    Di backtest itu tidak kelihatan: hari terakhir 2026-08-16 memang ujung
+    jendela uji. Di job harian, hari terakhir itu KEMARIN, dan tiap hari.
+
+    Akibatnya, tiap hari job harian:
+      * melaporkan posisi yang sebenarnya sudah tutup kemarin sebagai terbuka,
+      * mengunci slot dan ekuitasnya, sehingga sinyal masuk hari itu DIBUANG.
+
+    Diukur pada data 2019-2026: 226 dari 298 trade (76%) tidak akan pernah
+    terkirim, karena hampir semua entri lahir di hari yang juga menutup posisi
+    sebelumnya. Gerbang v1.4.2 tidak menangkapnya -- gerbang itu menguji replay
+    satu jendela penuh, bukan rantai jendela harian.
+
+    Perbaikannya sengaja TIDAK menyentuh engine.py (§2.2 melarangnya, dan bukti
+    gerbang v1.4.2 bersandar padanya). Yang dilakukan: memberi engine SATU hari
+    tambahan di ujung, supaya `dates[:-1]` mencakup hari data terakhir yang
+    sesungguhnya.
+
+    Baris penanda itu:
+      * open = NaN  -> engine TIDAK BISA membuka posisi di hari data terakhir
+        (filter `day[entry_price_col].notna()`), jadi seleksi sinyal tetap
+        sepenuhnya milik pipeline.signals_for_day() seperti sebelumnya;
+      * high/low = NaN -> tidak pernah dibaca, karena hari penanda sendiri tidak
+        ikut diiterasi;
+      * close = close terakhir yang SUNGGUHAN -> tutup-paksa posisi yang memang
+        masih hidup tetap menghasilkan baris "eod", dengan harga mark-to-market
+        yang sama persis seperti sebelum perbaikan ini.
+
+    Efek sampingan yang menguntungkan: `days_held` pada baris "eod" menjadi
+    (hari penanda - entry) + 1, yaitu nomor hari posisi itu HARI INI -- persis
+    yang dimaksud pesan alarm ("hari ini hari ke-13, besok tutup paksa").
+    Sebelumnya angka itu terhitung sampai kemarin dan meleset satu hari.
+
+    Nilai di hari data terakhir tidak berubah sedikit pun: seluruh indikator
+    menoleh ke belakang, dan next_open di hari itu memang sudah NaN sebelumnya
+    (ia baris terakhir). Yang berubah hanya: engine sekarang sampai ke sana.
+    """
+    data_through = pd.Timestamp(data_through)
+    sentinel = data_through + pd.Timedelta(days=1)
+    out = {}
+    for sym, df in raw.items():
+        # Potong dulu di data_through. Kalau satu simbol kebetulan sudah punya
+        # lilin sesudahnya (mis. lilin ETH kemarin belum terbit saat BTC sudah),
+        # baris itu akan menjadi tanggal terakhir panel dan hari penanda kehilangan
+        # gunanya: engine kembali tidak mengurus barrier di hari data terakhir,
+        # dan lebih buruk lagi ia bisa membuka posisi sendiri di sana sehingga
+        # sinyal hari itu tertelan sebagai "posisi terbuka" dan tidak pernah dikirim.
+        df = df[df.index <= data_through]
+        if df.empty or df.index.max() != data_through:
+            out[sym] = df          # simbol yang datanya tertinggal: biarkan apa adanya
+            continue
+        row = {c: float("nan") for c in df.columns}
+        row["close"] = float(df["close"].iloc[-1])
+        penanda = pd.DataFrame([row], columns=df.columns,
+                               index=pd.DatetimeIndex([sentinel], name=df.index.name))
+        out[sym] = pd.concat([df, penanda])
+    return out, sentinel
+
+
 def still_open(trades: pd.DataFrame) -> pd.DataFrame:
     """Posisi yang MASIH TERBUKA di ujung data.
 
@@ -37,6 +109,11 @@ def still_open(trades: pd.DataFrame) -> pd.DataFrame:
     jendela uji", tapi di job harian artinya "posisi ini sebenarnya masih
     terbuka sekarang". Harga dan R pada baris itu adalah tanda-mati-sementara,
     bukan hasil sungguhan.
+
+    HANYA sah dipakai kalau tanggal terakhir yang dilihat engine adalah hari
+    penanda dari append_sentinel_day(). Tanpa itu, baris "eod" juga memuat posisi
+    yang sebenarnya sudah kena SL/TP/batas waktu di hari data terakhir, karena
+    engine tidak pernah mengurus barrier di tanggal terakhirnya.
     """
     if trades.empty:
         return trades

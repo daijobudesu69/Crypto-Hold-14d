@@ -81,21 +81,39 @@ def collect(now_utc: datetime | None = None, end: str | None = None,
     if raw is None:
         raw = binance_data.load(syms, start=cfg.BACKTEST_START, end=end, verbose=True)
     syms = tuple(s for s in syms if s in raw)
-    data_through = min(df.index.max() for df in raw.values())
 
-    panel = panel_v14.build(raw)
+    # data_through ditentukan HANYA oleh universe produksi. Simbol shadow (§2.4)
+    # tidak boleh ikut menentukannya: kalau SOL sehari saja telat/di-halt di
+    # Binance, min() atas seluruh simbol akan memundurkan hari sinyal produksi
+    # satu hari penuh -- shadow berubah dari pencatat jadi pemblokir, persis yang
+    # dilarang §2.4. Baris shadow untuk hari itu memang lalu kosong; itu jujur.
+    produksi = [s for s in cfg.UNIVERSE if s in raw]
+    if not produksi:
+        raise RuntimeError(f"tidak satu pun simbol produksi {cfg.UNIVERSE} ada di data")
+    data_through = min(raw[s].index.max() for s in produksi)
+
+    # Hari penanda: memaksa engine mengurus barrier di hari data terakhir.
+    # Lihat pipeline.append_sentinel_day() -- tanpa ini 76% sinyal hilang.
+    raw_engine, sentinel_day = pipeline.append_sentinel_day(raw, data_through)
+
+    panel = panel_v14.build(raw_engine)
     panel = shadow.add_shadow_columns(panel)
     regime = panel_v14.empty_regime(panel)
 
     c = cfg.production_engine_config()
-    c.end = _fmt(data_through)
+    c.end = _fmt(sentinel_day)
     import engine
     trades = pipeline.with_execution_plan(engine.run(panel, regime, c))
     signal_day = data_through
 
     # --- posisi yang MASIH terbuka -----------------------------------------
-    # engine menutup paksa yang masih hidup di tanggal terakhir dan menandainya
-    # "eod". Di backtest itu artinya akhir jendela; di sini artinya masih terbuka.
+    # engine menutup paksa yang masih hidup di tanggal terakhir (= hari penanda)
+    # dan menandainya "eod". Di backtest itu artinya akhir jendela; di sini
+    # artinya benar-benar masih terbuka saat pasar dibuka hari ini -- barrier
+    # hari data terakhir sudah diurus lebih dulu, berkat hari penanda.
+    # `days_held` pada baris itu = nomor hari posisi HARI INI (lihat
+    # pipeline.append_sentinel_day), jadi alarm hari ke-13 jatuh tepat sehari
+    # sebelum tutup paksa, sesuai bunyi pesannya.
     open_pos, alarms, open_symbols = [], [], set()
     for _, t in pipeline.still_open(trades).iterrows():
         p = {"symbol": t["symbol"], "entry_date": _fmt(t["entry_date"]),
@@ -135,6 +153,17 @@ def collect(now_utc: datetime | None = None, end: str | None = None,
             day_open, entry_px = entry_price_fn(f"{sym}{cfg.QUOTE_ASSET}")
         except Exception as e:
             raise RuntimeError(f"harga open hari ini untuk {sym} tidak terbaca: {e}") from None
+        # Kontrak §2.2: sinyal di close hari t DIISI di open hari t+1, tanpa
+        # pengecualian. Kalau lilin yang dipakai bukan hari sesudah signal_day --
+        # misalnya Binance telat menerbitkan lilin kemarin, sehingga data_through
+        # mundur -- maka yang dieksekusi bukan lagi trade yang sama dengan yang
+        # di-backtest. Berhenti keras; diam-diam menggeser hari eksekusi adalah
+        # persis jenis penyimpangan yang membuat v1.4.4 kehilangan arti.
+        if pd.Timestamp(day_open).normalize() != sentinel_day:
+            raise RuntimeError(
+                f"{sym}: harga eksekusi diambil dari lilin {_fmt(day_open)}, "
+                f"padahal sinyal lahir di {_fmt(signal_day)} sehingga fill WAJIB "
+                f"di {_fmt(sentinel_day)} (open t+1). Data pasar kemungkinan telat.")
         atr = float(row["atr14"])
         sl, tp = cfg.barriers(entry_px, atr)
         wanted, _ = cfg.position_size_frac(entry_px, atr)
@@ -155,7 +184,13 @@ def collect(now_utc: datetime | None = None, end: str | None = None,
     shadow_rows = [r for s in syms
                    if (r := shadow.row_for(panel, s, signal_day))]
 
+    # Sinyal yang lahir HARI INI tidak ada di trade log: engine tidak bisa
+    # membukanya (harga eksekusi baru ada hari ini). Tanpa baris ini heartbeat
+    # bisa menulis "sinyal terakhir 299 hari lalu" di hari yang barusan
+    # mengirim sinyal.
     last_sig = trades["signal_date"].max() if len(trades) else None
+    if new_entries:
+        last_sig = signal_day
     return {
         "run_utc": now_utc,
         "run_date": now_utc.strftime("%Y-%m-%d"),
