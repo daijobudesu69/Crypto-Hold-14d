@@ -263,5 +263,56 @@ cek("semua penulisan Sheets lewat _retry",
 cek("worksheet hanya dibuat saat memang belum ada",
     "except gspread.exceptions.WorksheetNotFound" in src_sheets_now)
 
+print()
+print("=== 11. Sebab kegagalan wajib muncul sebagai annotation GitHub ===")
+# Log mentah Actions disajikan dari blob storage yang sering diblokir kebijakan
+# egress, jadi pemeriksa otomatis di luar GitHub cuma bisa membaca endpoint
+# annotations -- dan endpoint itu dulu hanya berisi "Process completed with exit
+# code 1". Pemeriksa harian 8 Sep 2026 karena itu menuduh HTTP 451 Binance untuk
+# kegagalan yang sebenarnya HTTP 503 Google Sheets.
+import contextlib
+import io as _io
+
+import daily_job
+
+
+def _tangkap(env_ci, tahap, pesan):
+    lama = os.environ.get("GITHUB_ACTIONS")
+    if env_ci is None:
+        os.environ.pop("GITHUB_ACTIONS", None)
+    else:
+        os.environ["GITHUB_ACTIONS"] = env_ci
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            daily_job._ci_error(tahap, pesan)
+    finally:
+        os.environ.pop("GITHUB_ACTIONS", None)
+        if lama is not None:
+            os.environ["GITHUB_ACTIONS"] = lama
+    return buf.getvalue()
+
+
+SEBAB = ("gagal tulis shadow_log: RuntimeError: tidak bisa membuka spreadsheet."
+         + chr(10) + "APIError: [503]: 100% unavailable")
+keluar = _tangkap("true", "pengiriman", SEBAB)
+cek("annotation ditulis saat jalan di GitHub Actions", keluar.startswith("::error::"),
+    keluar.strip()[:70])
+cek("sebab sebenarnya ikut terbawa, bukan cuma exit code",
+    "503" in keluar and "shadow_log" in keluar)
+cek("tahap ikut disebut", "pengiriman" in keluar)
+# Perintah workflow GitHub HARUS satu baris; newline mentah memotong pesannya.
+cek("tepat satu baris", len(keluar.strip().splitlines()) == 1,
+    f"{len(keluar.strip().splitlines())} baris")
+cek("newline di-encode jadi %0A", "%0A" in keluar)
+cek("persen di-encode jadi %25", "%25" in keluar)
+cek("di luar GitHub Actions tidak mencetak apa-apa",
+    _tangkap(None, "pengiriman", SEBAB) == ""
+    and _tangkap("false", "pengiriman", SEBAB) == "")
+
+src_job = inspect.getsource(daily_job)
+cek("ketiga jalur gagal memanggil _ci_error", src_job.count("_ci_error(") >= 4,
+    f"{src_job.count('_ci_error(')} pemakaian (1 definisi + 3 pemanggilan)")
+
 print("\n" + ("SEMUA TES JOB HARIAN LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)
