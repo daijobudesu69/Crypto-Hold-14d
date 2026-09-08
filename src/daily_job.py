@@ -57,6 +57,34 @@ import sheets
 WARMUP_TAIL_DAYS = 5     # berapa hari ke belakang dianggap "baru saja" untuk sinyal
 
 
+def _ci_error(tahap: str, pesan: str) -> None:
+    """Tulis sebab kegagalan sebagai ANNOTATION GitHub Actions.
+
+    KENAPA INI ADA. Log mentah GitHub Actions disajikan dari blob storage
+    (productionresultssa18.blob.core.windows.net). Pemeriksa otomatis yang
+    berjalan di luar GitHub -- termasuk routine harian yang melacak gerbang
+    v1.4.3 -- sering diblokir kebijakan egress ke host itu, sehingga satu-
+    satunya yang bisa mereka baca adalah endpoint annotations. Selama ini
+    endpoint itu cuma berisi "Process completed with exit code 1": nol
+    informasi tentang APA yang gagal.
+
+    Akibatnya sudah terjadi sungguhan. Pemeriksa harian 8 Sep 2026 menuduh
+    kegagalan 5 Sep disebabkan HTTP 451 Binance, padahal sebabnya HTTP 503
+    Google Sheets -- ia menebak dari pesan commit karena tidak punya cara lain,
+    lalu mengirim tebakan itu sebagai notifikasi. Diagnosis yang salah arah
+    lebih mahal daripada tidak ada diagnosis sama sekali.
+
+    Satu baris di sini membuat sebabnya terbaca lewat API, permanen, tanpa
+    kredensial apa pun. Perintah workflow GitHub harus SATU baris, jadi newline
+    dan '%' wajib di-encode.
+    """
+    if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
+        return
+    teks = f"{tahap}: {pesan}"
+    aman = (teks.replace("%", "%25").replace(chr(13), "%0D").replace(chr(10), "%0A"))
+    print(f"::error::{aman[:900]}", flush=True)
+
+
 def _fmt(d) -> str:
     return pd.Timestamp(d).date().isoformat()
 
@@ -267,6 +295,7 @@ def assert_not_silently_dry() -> None:
         ("GOOGLE_SERVICE_ACCOUNT_JSON", os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")),
         ("SHEET_ID", os.environ.get("SHEET_ID"))) if not v]
     if hilang:
+        _ci_error("kredensial", "secret hilang di GitHub Actions: " + ", ".join(hilang))
         raise SystemExit(
             "GAGAL: berjalan di GitHub Actions tanpa secret " + ", ".join(hilang) + ".\n"
             "Job akan diam-diam masuk mode kering dan melapor sukses tanpa mengirim\n"
@@ -287,6 +316,7 @@ def main() -> int:
         # Kegagalan tarik/hitung berarti sinyal hari ini tidak bisa dipercaya.
         # Wajib berisik: diam adalah mode gagal yang paling berbahaya di sini.
         print(traceback.format_exc())
+        _ci_error("tarik data / replay", f"{type(e).__name__}: {e}")
         notify.send(notify.error_message("tarik data / replay", f"{type(e).__name__}: {e}"))
         try:
             sheets.append_run("error", "-", 0, 0, 0, 0, f"{type(e).__name__}: {e}")
@@ -309,6 +339,7 @@ def main() -> int:
         print("\n  MASALAH:")
         for p in problems:
             print("   -", p)
+        _ci_error("pengiriman", "; ".join(problems))
         notify.send(notify.error_message("pengiriman", "; ".join(problems)))
         return 1
     print("\n  Job selesai tanpa masalah.")
