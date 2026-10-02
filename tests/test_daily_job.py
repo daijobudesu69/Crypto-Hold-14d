@@ -377,5 +377,42 @@ cek("baris tetap ditulis, harga kosong",
 cek("pesan tanpa harga saat kirim tidak memuat baris itu",
     "Harga saat pesan ini dikirim" not in notify.entry_message(TRADE))
 
+print("\n=== 13. Sheet 'trades': buku besar forward test ===")
+import pandas as pd
+
+
+def _t(sym, sig, ent, ext, reason, R, net, size=0.5):
+    ts = lambda s: pd.Timestamp(s, tz="UTC")
+    return dict(symbol=sym, signal_date=ts(sig), entry_date=ts(ent), exit_date=ts(ext),
+                reason=reason, days_held=(ts(ext) - ts(ent)).days + 1,
+                entry_px=100.0, exit_px=100.0 * (1 + net), oco_stop_loss=95.0,
+                oco_take_profit=110.0, size_frac_used=size, net_ret=net, R_net=R)
+
+
+TR = pd.DataFrame([
+    _t("BTC", "2025-10-26", "2025-10-27", "2025-11-04", "time", 0.2, 0.01),   # backtest
+    _t("ETH", "2026-08-21", "2026-08-22", "2026-08-23", "sl", -1.06, -0.056),
+    _t("BTC", "2026-08-21", "2026-08-22", "2026-09-04", "time", 0.35, 0.014, 0.431),
+    _t("ETH", "2026-09-15", "2026-09-16", "2026-09-21", "tp", 1.95, 0.124),
+    _t("ETH", "2026-09-21", "2026-09-22", "2026-10-02", "eod", -0.49, -0.028),
+])
+rows = daily_job.forward_trade_rows(TR)
+cek("trade jendela backtest tidak ikut", len(rows) == 4 and
+    all(r["signal_date"] > cfg.BACKTEST_END for r in rows), f"{len(rows)} baris")
+cek("kolom persis TRADES_HEADER", all(set(r) == set(sheets.TRADES_HEADER) for r in rows))
+cek("urut tanggal masuk", [r["entry_date"] for r in rows]
+    == sorted(r["entry_date"] for r in rows))
+buka = [r for r in rows if r["status"] == "open"]
+cek("posisi 'eod' ditandai open, bukan hasil",
+    len(buka) == 1 and buka[0]["reason"] == "mark-to-market" and buka[0]["cum_R_closed"] is None)
+tutup = sorted((r for r in rows if r["status"] == "closed"), key=lambda r: r["exit_date"])
+cek("cum_R menjumlah trade tutup urut tanggal keluar",
+    [r["cum_R_closed"] for r in tutup] == [-1.06, -0.71, 1.24],
+    str([r["cum_R_closed"] for r in tutup]))
+cek("equity_pct = ukuran dipakai x return bersih",
+    abs(tutup[1]["equity_pct"] - 100 * 0.431 * 0.014) < 1e-9, str(tutup[1]["equity_pct"]))
+cek("tanpa trade -> nol baris", daily_job.forward_trade_rows(TR.iloc[0:0]) == []
+    and daily_job.forward_trade_rows(None) == [])
+
 print("\n" + ("SEMUA TES JOB HARIAN LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)

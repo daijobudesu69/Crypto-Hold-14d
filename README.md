@@ -44,7 +44,8 @@ Menambahkan salah satunya berarti mengulang pekerjaan yang sudah terbukti gagal.
 | `tests/test_replay_v142.py` | **Gerbang v1.4.2** — replay 2019-2026 lewat pipa produksi |
 | `src/shadow.py` | Kolom shadow §2.4 — dicatat, **tidak pernah** memblokir |
 | `src/notify.py` | Pesan Telegram: sinyal masuk (dengan harga OCO), alarm hari ke-13, heartbeat, error |
-| `src/sheets.py` | Google Sheets: `shadow_log` (kandidat harian), `runs` (bukti cron hidup), `entries` (jam & harga saat sinyal dikirim) |
+| `src/sheets.py` | Google Sheets: `shadow_log` (kandidat harian), `runs` (bukti cron hidup), `entries` (jam & harga saat sinyal dikirim), `trades` (buku besar forward test — ditulis ulang penuh tiap hari dari replay) |
+| `src/yearly_report.py` | P&L backtest per tahun (workflow *Laporan backtest per tahun*, hanya jendela ≤ `BACKTEST_END`) |
 | `src/daily_job.py` | Orkestrator cron harian. **Tanpa state** — replay penuh tiap hari |
 | `tests/test_signal_equivalence.py` | Membuktikan seleksi sinyal live == engine, 2.784 hari |
 | `tests/test_daily_job.py` | Bentuk pesan, mode kering, pengaman kredensial, pencatatan `entries` |

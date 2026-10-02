@@ -334,6 +334,47 @@ def append_shadow(rows: list[dict]) -> bool:
     return True
 
 
+# Buku besar forward test: trade yang lahir SESUDAH jendela backtest
+# (signal_date > BACKTEST_END), tutup maupun masih terbuka. Tanpa sheet ini
+# pertanyaan "hasilnya berapa?" hanya bisa dijawab dengan merekonstruksi.
+#
+# DITULIS ULANG PENUH tiap hari, bukan ditambah. Isinya turunan replay penuh
+# yang deterministik (lihat docstring daily_job), jadi menulis ulang membuatnya
+# sembuh sendiri: hari yang job-nya gagal tidak meninggalkan lubang, dan baris
+# posisi terbuka (mark-to-market) ikut diperbarui.
+TRADES_SHEET = "trades"
+TRADES_HEADER = ["symbol", "signal_date", "entry_date", "exit_date", "status",
+                 "reason", "days_held", "entry_px", "exit_px", "oco_stop_loss",
+                 "oco_take_profit", "size_frac_used", "net_ret_pct", "R_net",
+                 "equity_pct", "cum_R_closed"]
+
+
+def write_trades(rows: list[dict]) -> bool:
+    """Tulis ulang sheet `trades` seluruhnya (lihat TRADES_HEADER)."""
+    data = _rows_to_lists(rows, TRADES_HEADER)
+    if is_dry_run():
+        print(f"--- GOOGLE SHEETS '{TRADES_SHEET}' (MODE KERING, ditulis ulang penuh) ---")
+        print("  " + " | ".join(TRADES_HEADER))
+        for r in data:
+            print("  " + " | ".join("" if v == "" else
+                                    (f"{v:.6g}" if isinstance(v, float) else str(v))
+                                    for v in r))
+        print("-" * 70)
+        return True
+    book = _client()
+    ws = _worksheet(book, TRADES_SHEET, TRADES_HEADER)
+    # Tulis dulu, baru bersihkan sisa di bawahnya -- urutan sebaliknya membuat
+    # sheet kosong kalau penulisan gagal di tengah.
+    _retry(f"tulis {len(data)} baris ke '{TRADES_SHEET}'",
+           lambda: ws.update(values=[TRADES_HEADER] + data, range_name="A1",
+                             value_input_option="RAW"))
+    sisa = len(data) + 2
+    if ws.row_count >= sisa:
+        _retry(f"bersihkan sisa '{TRADES_SHEET}'",
+               lambda: ws.batch_clear([f"A{sisa}:Z{ws.row_count}"]))
+    return True
+
+
 def append_entries(rows: list[dict]) -> bool:
     """Catat waktu kirim + harga saat kirim tiap sinyal masuk (lihat ENTRIES_HEADER)."""
     if not rows:

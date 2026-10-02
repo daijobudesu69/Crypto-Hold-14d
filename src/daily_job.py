@@ -237,6 +237,42 @@ def collect(now_utc: datetime | None = None, end: str | None = None,
     }
 
 
+def forward_trade_rows(trades: pd.DataFrame) -> list[dict]:
+    """Baris sheet `trades`: semua trade yang sinyalnya lahir sesudah jendela
+    backtest (signal_date > BACKTEST_END), urut tanggal masuk.
+
+    Posisi yang masih terbuka (reason "eod", lihat pipeline.still_open) ditandai
+    status "open": exit_px-nya close terakhir dan R-nya mark-to-market, BUKAN
+    hasil. cum_R_closed hanya menjumlah trade yang sudah tutup.
+    """
+    if trades is None or trades.empty:
+        return []
+    batas = pd.Timestamp(cfg.BACKTEST_END, tz="UTC")
+    t = trades[trades["signal_date"] > batas].sort_values(["entry_date", "symbol"])
+    terbuka = set(pipeline.still_open(t).index)
+    cum_by_idx = (t.loc[~t.index.isin(terbuka)].sort_values(["exit_date", "symbol"])["R_net"]
+                  .cumsum())
+    rows = []
+    for idx, r in t.iterrows():
+        buka = idx in terbuka
+        rows.append({
+            "symbol": r["symbol"], "signal_date": _fmt(r["signal_date"]),
+            "entry_date": _fmt(r["entry_date"]), "exit_date": _fmt(r["exit_date"]),
+            "status": "open" if buka else "closed",
+            "reason": "mark-to-market" if buka else r["reason"],
+            "days_held": int(r["days_held"]),
+            "entry_px": round(float(r["entry_px"]), 4), "exit_px": round(float(r["exit_px"]), 4),
+            "oco_stop_loss": round(float(r["oco_stop_loss"]), 4),
+            "oco_take_profit": round(float(r["oco_take_profit"]), 4),
+            "size_frac_used": round(float(r["size_frac_used"]), 4),
+            "net_ret_pct": round(100 * float(r["net_ret"]), 4),
+            "R_net": round(float(r["R_net"]), 4),
+            "equity_pct": round(100 * float(r["size_frac_used"]) * float(r["net_ret"]), 4),
+            "cum_R_closed": None if buka else round(float(cum_by_idx[idx]), 4),
+        })
+    return rows
+
+
 def _harga_saat_kirim(sym: str, price_fn) -> float | None:
     """Harga pasar sekarang, atau None. Kegagalan di sini TIDAK boleh menahan
     sinyal: ini pengukuran, bukan bagian dari keputusan trading."""
@@ -293,6 +329,11 @@ def dispatch(state: dict, price_fn=None, clock=None) -> list[str]:
         sheets.append_shadow(state["shadow_rows"])
     except Exception as e:
         problems.append(f"gagal tulis shadow_log: {type(e).__name__}: {e}")
+
+    try:
+        sheets.write_trades(forward_trade_rows(state.get("trades")))
+    except Exception as e:
+        problems.append(f"gagal tulis trades: {type(e).__name__}: {e}")
 
     # Heartbeat dikirim TERAKHIR supaya ia melaporkan hasil sebenarnya, bukan
     # niat. Kalau ada yang gagal di atas, itu ikut kelihatan di pesan error.
