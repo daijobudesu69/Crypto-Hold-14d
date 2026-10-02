@@ -314,5 +314,105 @@ src_job = inspect.getsource(daily_job)
 cek("ketiga jalur gagal memanggil _ci_error", src_job.count("_ci_error(") >= 4,
     f"{src_job.count('_ci_error(')} pemakaian (1 definisi + 3 pemanggilan)")
 
+print("\n=== 12. Jam kirim + harga saat kirim tercatat di sheet 'entries' ===")
+# Cron dijadwalkan 00:05 UTC, tapi di produksi (Agt-Okt 2026) jalan 03:46-05:05
+# UTC. Shadow log mencatat harga OPEN 00:00; pesan sampai berjam-jam kemudian.
+# Selisih itu harus terukur, dan pengukurannya tidak boleh menahan sinyal.
+from datetime import datetime, timezone
+
+JAM_KIRIM = datetime(2026, 8, 22, 4, 30, tzinfo=timezone.utc)
+STATE = {"run_date": "2026-08-22", "run_time": "04:29", "data_through": "2026-08-21",
+         "new_entries": [TRADE], "open_positions": [], "alarms": [],
+         "shadow_rows": [], "n_signals": 1, "n_shadow_rows": 0,
+         "last_signal_date": "2026-08-21", "days_since_last_signal": 0}
+
+
+def _dispatch_kering(price_fn):
+    simpan = {k: os.environ.pop(k, None) for k in
+              ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+               "GOOGLE_SERVICE_ACCOUNT_JSON", "SHEET_ID")}
+    tulis = {}
+    asli = sheets.append_entries
+    sheets.append_entries = lambda rows: tulis.setdefault("rows", rows) is not None
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            masalah = daily_job.dispatch(STATE, price_fn=price_fn, clock=lambda: JAM_KIRIM)
+    finally:
+        sheets.append_entries = asli
+        for k, v in simpan.items():
+            if v is not None:
+                os.environ[k] = v
+    return masalah, tulis.get("rows", []), buf.getvalue()
+
+
+_PX_KIRIM = _PX * 1.02
+masalah, baris, log = _dispatch_kering(lambda pair: _PX_KIRIM)
+cek("dispatch kering tanpa masalah", masalah == [], str(masalah))
+cek("satu baris per sinyal masuk", len(baris) == 1, f"{len(baris)} baris")
+b = baris[0] if baris else {}
+cek("header entries lengkap", set(b) == set(sheets.ENTRIES_HEADER),
+    str(set(sheets.ENTRIES_HEADER) ^ set(b)))
+cek("jam kirim aktual tercatat", b.get("sent_utc") == "2026-08-22 04:30:00",
+    str(b.get("sent_utc")))
+cek("lag dihitung dari open 00:00 UTC hari fill", b.get("lag_min") == 270,
+    str(b.get("lag_min")))
+cek("harga model tetap open, bukan harga saat kirim", b.get("model_entry_px") == _PX)
+cek("harga saat kirim tercatat", b.get("px_at_send") == _PX_KIRIM)
+cek("drift +2%", abs(b.get("drift_pct", 0) - 2.0) < 1e-6, str(b.get("drift_pct")))
+cek("pesan Telegram memuat harga saat kirim", f"{_PX_KIRIM:,.2f}" in log)
+cek("SL/TP di pesan tetap dari acuan open",
+    f"{_SL:,.2f}" in log and f"{_TP:,.2f}" in log)
+
+
+def _harga_gagal(pair):
+    raise RuntimeError("semua host data Binance gagal")
+
+
+masalah, baris, log = _dispatch_kering(_harga_gagal)
+cek("harga saat kirim gagal TIDAK menahan sinyal",
+    masalah == [] and "SINYAL MASUK" in log, str(masalah))
+cek("baris tetap ditulis, harga kosong",
+    len(baris) == 1 and baris[0]["px_at_send"] is None and baris[0]["drift_pct"] is None)
+cek("pesan tanpa harga saat kirim tidak memuat baris itu",
+    "Harga saat pesan ini dikirim" not in notify.entry_message(TRADE))
+
+print("\n=== 13. Sheet 'trades': buku besar forward test ===")
+import pandas as pd
+
+
+def _t(sym, sig, ent, ext, reason, R, net, size=0.5):
+    ts = lambda s: pd.Timestamp(s, tz="UTC")
+    return dict(symbol=sym, signal_date=ts(sig), entry_date=ts(ent), exit_date=ts(ext),
+                reason=reason, days_held=(ts(ext) - ts(ent)).days + 1,
+                entry_px=100.0, exit_px=100.0 * (1 + net), oco_stop_loss=95.0,
+                oco_take_profit=110.0, size_frac_used=size, net_ret=net, R_net=R)
+
+
+TR = pd.DataFrame([
+    _t("BTC", "2025-10-26", "2025-10-27", "2025-11-04", "time", 0.2, 0.01),   # backtest
+    _t("ETH", "2026-08-21", "2026-08-22", "2026-08-23", "sl", -1.06, -0.056),
+    _t("BTC", "2026-08-21", "2026-08-22", "2026-09-04", "time", 0.35, 0.014, 0.431),
+    _t("ETH", "2026-09-15", "2026-09-16", "2026-09-21", "tp", 1.95, 0.124),
+    _t("ETH", "2026-09-21", "2026-09-22", "2026-10-02", "eod", -0.49, -0.028),
+])
+rows = daily_job.forward_trade_rows(TR)
+cek("trade jendela backtest tidak ikut", len(rows) == 4 and
+    all(r["signal_date"] > cfg.BACKTEST_END for r in rows), f"{len(rows)} baris")
+cek("kolom persis TRADES_HEADER", all(set(r) == set(sheets.TRADES_HEADER) for r in rows))
+cek("urut tanggal masuk", [r["entry_date"] for r in rows]
+    == sorted(r["entry_date"] for r in rows))
+buka = [r for r in rows if r["status"] == "open"]
+cek("posisi 'eod' ditandai open, bukan hasil",
+    len(buka) == 1 and buka[0]["reason"] == "mark-to-market" and buka[0]["cum_R_closed"] is None)
+tutup = sorted((r for r in rows if r["status"] == "closed"), key=lambda r: r["exit_date"])
+cek("cum_R menjumlah trade tutup urut tanggal keluar",
+    [r["cum_R_closed"] for r in tutup] == [-1.06, -0.71, 1.24],
+    str([r["cum_R_closed"] for r in tutup]))
+cek("equity_pct = ukuran dipakai x return bersih",
+    abs(tutup[1]["equity_pct"] - 100 * 0.431 * 0.014) < 1e-9, str(tutup[1]["equity_pct"]))
+cek("tanpa trade -> nol baris", daily_job.forward_trade_rows(TR.iloc[0:0]) == []
+    and daily_job.forward_trade_rows(None) == [])
+
 print("\n" + ("SEMUA TES JOB HARIAN LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)

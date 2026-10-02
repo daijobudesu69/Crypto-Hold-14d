@@ -116,12 +116,20 @@ def entry_message(trade: dict) -> str:
     di mana memasang order, dan asumsi backtest soal harga exit jadi tidak
     berdasar (§2.8)."""
     sym = _e(trade["symbol"])
+    # Harga saat kirim: hanya informasi. Cron di produksi jalan jam-jam sesudah
+    # open, jadi harga pasar sudah bergerak dari acuan -- SL/TP tetap dari acuan.
+    sekarang = ""
+    if trade.get("px_at_send") is not None:
+        drift = 100 * (trade["px_at_send"] / trade["entry_px"] - 1)
+        sekarang = (f"Harga saat pesan ini dikirim: {_f(trade['px_at_send'])} "
+                    f"({'+' if drift >= 0 else '−'}{_f(abs(drift))}% dari acuan)\n")
     return (
         f"🟢 <b>SINYAL MASUK — {sym}</b>\n"
         f"Sinyal: {_e(trade['signal_date'])} (close 00:00 UTC)\n"
         f"\n"
         f"<b>BELI di harga open hari ini</b>\n"
         f"Acuan entry : <b>{_f(trade['entry_px'])}</b>\n"
+        f"{sekarang}"
         f"\n"
         f"<b>Pasang SATU order OCO sekarang:</b>\n"
         f"  Take Profit : <b>{_f(trade['oco_take_profit'])}</b>  "

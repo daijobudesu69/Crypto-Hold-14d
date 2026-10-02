@@ -59,7 +59,8 @@ def _ms(ts: str | pd.Timestamp) -> int:
     return int(t.timestamp() * 1000)
 
 
-def _get(session: requests.Session, params: dict) -> list:
+def _get(session: requests.Session, params: dict,
+         hosts: tuple[str, ...] | None = None) -> list | dict:
     """GET dengan backoff, mencoba tiap host berurutan.
 
     Perbedaan penanganan yang disengaja:
@@ -78,7 +79,7 @@ def _get(session: requests.Session, params: dict) -> list:
       * 429/418/5xx -> ditunggu lalu diulang di host yang sama.
     """
     kegagalan = []
-    for host in cfg.BINANCE_KLINES_HOSTS:
+    for host in hosts or cfg.BINANCE_KLINES_HOSTS:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 r = session.get(host, params=params, timeout=REQUEST_TIMEOUT)
@@ -177,6 +178,25 @@ def current_open(symbol: str, session: requests.Session | None = None,
     if got != today:
         raise RuntimeError(f"{symbol}: diminta lilin {today.date()}, dapat {got.date()}")
     return got, float(batch[0][1])
+
+
+# Host yang sama dengan klines, urutan fallback yang sama -- termasuk alasan
+# data-api.binance.vision didahulukan (lihat config_v14.BINANCE_KLINES_HOSTS).
+TICKER_HOSTS: tuple[str, ...] = tuple(
+    h.replace("/klines", "/ticker/price") for h in cfg.BINANCE_KLINES_HOSTS)
+
+
+def current_price(symbol: str, session: requests.Session | None = None) -> float:
+    """Harga terakhir SAAT INI -- bukan harga model.
+
+    Hanya untuk PENGUKURAN (sheet `entries`): seberapa jauh harga sudah bergerak
+    dari open 00:00 UTC saat pesan sinyal benar-benar terkirim. Cron dijadwalkan
+    00:05 UTC tapi di produksi jalan 03:46-05:05 UTC; harga ini tidak pernah
+    masuk ke sinyal, SL/TP, atau ukuran posisi.
+    """
+    session = session or requests.Session()
+    data = _get(session, {"symbol": symbol}, hosts=TICKER_HOSTS)
+    return float(data["price"])
 
 
 def assert_contiguous(df: pd.DataFrame, symbol: str) -> None:

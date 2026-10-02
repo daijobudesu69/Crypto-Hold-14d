@@ -1,0 +1,38 @@
+# Laporan backtest per tahun — replay 2019 s/d BACKTEST_END, baca-saja.
+#
+# KEAMANAN (§6.1 aturan 1): TIDAK ADA `pull_request_target`, dan workflow ini
+# tidak memakai secret apa pun selain GITHUB_TOKEN bawaan. Hanya jendela
+# backtest yang dilaporkan (§6.1 aturan 3: posisi forward test tidak boleh publik).
+name: "Laporan backtest per tahun"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/yearly_report.py"
+      - ".github/workflows/backtest-report.yml"
+
+permissions:
+  contents: read
+  checks: write        # menerbitkan hasil sebagai check run (terbaca lewat API)
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Pasang dependensi
+        run: pip install -r requirements.txt
+
+      - name: Replay dan laporan per tahun
+        env:
+          PYTHONPATH: src
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python src/yearly_report.py

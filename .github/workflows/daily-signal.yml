@@ -9,9 +9,13 @@ name: "Sinyal harian v1.4 — momentum 28/120, hold maks 14d"
 on:
   schedule:
     # 00:05 UTC. Lilin harian tutup 00:00 UTC; jeda 5 menit memberi Binance waktu
-    # menyelesaikan lilinnya. Cron GitHub bisa telat beberapa menit saat sibuk —
-    # itu tidak masalah, karena harga eksekusi adalah OPEN hari ini yang sudah
-    # final sejak 00:00 dan tidak berubah sepanjang hari.
+    # menyelesaikan lilinnya. Harga acuan entry adalah OPEN hari ini yang sudah
+    # final sejak 00:00, jadi keterlambatan tidak mengubah sinyal.
+    #
+    # Keterlambatannya BUKAN beberapa menit: Agt-Okt 2026 run sungguhan mulai
+    # 03:46-05:05 UTC (10:46-12:05 WIB), tiap hari. Harga pasar saat pesan sampai
+    # sudah bergerak dari acuan; selisihnya dicatat di sheet `entries`
+    # (daily_job.entry_record) supaya bisa diukur, bukan ditebak.
     - cron: "5 0 * * *"
   workflow_dispatch:
 

@@ -139,5 +139,23 @@ except RuntimeError as e:
     cek("semua host menolak -> RuntimeError yang menyebut sebabnya",
         "451" in str(e) and all(h in str(e) for h in H), str(e)[:80])
 
+print("\n=== 7. Harga saat kirim: endpoint ticker, fallback host yang sama ===")
+
+
+class _SesiTicker(_Sesi):
+    def get(self, url, params=None, timeout=None):
+        self.url = url
+        r = super().get(url, params, timeout)
+        if r.status_code == 200:
+            r._d = {"symbol": params["symbol"], "price": "84857.38000000"}
+        return r
+
+
+sesi = _SesiTicker({H[0]: 451, H[1]: 200, H[2]: 200})
+px = bd.current_price("BTCUSDT", session=sesi)
+cek("harga ticker terbaca sebagai float", px == 84857.38, str(px))
+cek("memakai /ticker/price, bukan /klines", sesi.url.endswith("/api/v3/ticker/price"), sesi.url)
+cek("451 di host pertama -> pindah host", sesi.dicoba == [H[0], H[1]], str(sesi.dicoba))
+
 print("\n" + ("SEMUA TES PENGAMBIL DATA LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)
