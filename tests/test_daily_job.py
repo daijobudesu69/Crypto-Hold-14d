@@ -314,5 +314,68 @@ src_job = inspect.getsource(daily_job)
 cek("ketiga jalur gagal memanggil _ci_error", src_job.count("_ci_error(") >= 4,
     f"{src_job.count('_ci_error(')} pemakaian (1 definisi + 3 pemanggilan)")
 
+print("\n=== 12. Jam kirim + harga saat kirim tercatat di sheet 'entries' ===")
+# Cron dijadwalkan 00:05 UTC, tapi di produksi (Agt-Okt 2026) jalan 03:46-05:05
+# UTC. Shadow log mencatat harga OPEN 00:00; pesan sampai berjam-jam kemudian.
+# Selisih itu harus terukur, dan pengukurannya tidak boleh menahan sinyal.
+from datetime import datetime, timezone
+
+JAM_KIRIM = datetime(2026, 8, 22, 4, 30, tzinfo=timezone.utc)
+STATE = {"run_date": "2026-08-22", "run_time": "04:29", "data_through": "2026-08-21",
+         "new_entries": [TRADE], "open_positions": [], "alarms": [],
+         "shadow_rows": [], "n_signals": 1, "n_shadow_rows": 0,
+         "last_signal_date": "2026-08-21", "days_since_last_signal": 0}
+
+
+def _dispatch_kering(price_fn):
+    simpan = {k: os.environ.pop(k, None) for k in
+              ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+               "GOOGLE_SERVICE_ACCOUNT_JSON", "SHEET_ID")}
+    tulis = {}
+    asli = sheets.append_entries
+    sheets.append_entries = lambda rows: tulis.setdefault("rows", rows) is not None
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            masalah = daily_job.dispatch(STATE, price_fn=price_fn, clock=lambda: JAM_KIRIM)
+    finally:
+        sheets.append_entries = asli
+        for k, v in simpan.items():
+            if v is not None:
+                os.environ[k] = v
+    return masalah, tulis.get("rows", []), buf.getvalue()
+
+
+_PX_KIRIM = _PX * 1.02
+masalah, baris, log = _dispatch_kering(lambda pair: _PX_KIRIM)
+cek("dispatch kering tanpa masalah", masalah == [], str(masalah))
+cek("satu baris per sinyal masuk", len(baris) == 1, f"{len(baris)} baris")
+b = baris[0] if baris else {}
+cek("header entries lengkap", set(b) == set(sheets.ENTRIES_HEADER),
+    str(set(sheets.ENTRIES_HEADER) ^ set(b)))
+cek("jam kirim aktual tercatat", b.get("sent_utc") == "2026-08-22 04:30:00",
+    str(b.get("sent_utc")))
+cek("lag dihitung dari open 00:00 UTC hari fill", b.get("lag_min") == 270,
+    str(b.get("lag_min")))
+cek("harga model tetap open, bukan harga saat kirim", b.get("model_entry_px") == _PX)
+cek("harga saat kirim tercatat", b.get("px_at_send") == _PX_KIRIM)
+cek("drift +2%", abs(b.get("drift_pct", 0) - 2.0) < 1e-6, str(b.get("drift_pct")))
+cek("pesan Telegram memuat harga saat kirim", f"{_PX_KIRIM:,.2f}" in log)
+cek("SL/TP di pesan tetap dari acuan open",
+    f"{_SL:,.2f}" in log and f"{_TP:,.2f}" in log)
+
+
+def _harga_gagal(pair):
+    raise RuntimeError("semua host data Binance gagal")
+
+
+masalah, baris, log = _dispatch_kering(_harga_gagal)
+cek("harga saat kirim gagal TIDAK menahan sinyal",
+    masalah == [] and "SINYAL MASUK" in log, str(masalah))
+cek("baris tetap ditulis, harga kosong",
+    len(baris) == 1 and baris[0]["px_at_send"] is None and baris[0]["drift_pct"] is None)
+cek("pesan tanpa harga saat kirim tidak memuat baris itu",
+    "Harga saat pesan ini dikirim" not in notify.entry_message(TRADE))
+
 print("\n" + ("SEMUA TES JOB HARIAN LOLOS" if ok else "ADA TES YANG GAGAL"))
 raise SystemExit(0 if ok else 1)

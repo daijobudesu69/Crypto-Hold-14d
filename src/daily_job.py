@@ -1,7 +1,8 @@
 """Job harian — dijalankan GitHub Actions cron 00:05 UTC (V1_4_SPEC.md §5).
 
 Alur: tarik data -> bangun panel -> replay penuh -> sinyal hari ini + alarm hold
--> Telegram + Google Sheets -> catat eksekusi.
+-> Telegram + Google Sheets -> catat eksekusi (jam kirim + harga saat kirim di
+sheet `entries`).
 
 --------------------------------------------------------------------------------
 KEPUTUSAN DESAIN TERPENTING: JOB INI TANPA STATE.
@@ -236,13 +237,53 @@ def collect(now_utc: datetime | None = None, end: str | None = None,
     }
 
 
-def dispatch(state: dict) -> list[str]:
-    """Kirim semua pesan + tulis Sheets. Kembalikan daftar kegagalan."""
+def _harga_saat_kirim(sym: str, price_fn) -> float | None:
+    """Harga pasar sekarang, atau None. Kegagalan di sini TIDAK boleh menahan
+    sinyal: ini pengukuran, bukan bagian dari keputusan trading."""
+    try:
+        return float(price_fn(f"{sym}{cfg.QUOTE_ASSET}"))
+    except Exception as e:
+        print(f"  harga saat kirim {sym} tidak terbaca ({type(e).__name__}) -- sinyal tetap dikirim")
+        return None
+
+
+def entry_record(e: dict, sent_utc: datetime, sent_ok: bool) -> dict:
+    """Satu baris sheet `entries`: jarak waktu dan harga antara model dan kiriman."""
+    fill_day = datetime.fromisoformat(e["entry_date"]).replace(tzinfo=timezone.utc)
+    px = e.get("px_at_send")
+    return {
+        "sent_utc": sent_utc.strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": e["symbol"], "signal_date": e["signal_date"],
+        "entry_date": e["entry_date"], "model_entry_px": e["entry_px"],
+        "px_at_send": px,
+        "drift_pct": None if px is None else round(100 * (px / e["entry_px"] - 1), 4),
+        "lag_min": int((sent_utc - fill_day).total_seconds() // 60),
+        "oco_stop_loss": e["oco_stop_loss"], "oco_take_profit": e["oco_take_profit"],
+        "size_frac_used": e["size_frac_used"], "sent_ok": sent_ok,
+    }
+
+
+def dispatch(state: dict, price_fn=None, clock=None) -> list[str]:
+    """Kirim semua pesan + tulis Sheets. Kembalikan daftar kegagalan.
+
+    `price_fn` dan `clock` bisa disuntik untuk pengujian, sama seperti collect().
+    """
+    price_fn = price_fn or binance_data.current_price
+    clock = clock or (lambda: datetime.now(timezone.utc))
     problems = []
 
+    entries = []
     for e in state["new_entries"]:
-        if not notify.send(notify.entry_message(e)):
+        e = dict(e, px_at_send=_harga_saat_kirim(e["symbol"], price_fn))
+        terkirim = notify.send(notify.entry_message(e))
+        if not terkirim:
             problems.append(f"gagal kirim sinyal masuk {e['symbol']}")
+        entries.append(entry_record(e, clock(), terkirim))
+
+    try:
+        sheets.append_entries(entries)
+    except Exception as e:
+        problems.append(f"gagal tulis entries: {type(e).__name__}: {e}")
 
     for a in state["alarms"]:
         if not notify.send(notify.hold_alarm_message(a)):

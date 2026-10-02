@@ -52,6 +52,19 @@ SHADOW_HEADER = (["date", "symbol"] + list(cfg.SHADOW_COLUMNS)
 RUNS_HEADER = ["run_utc", "data_through", "n_signals", "n_open_positions",
                "n_shadow_rows", "n_alarms", "status", "note"]
 
+# Sheet terpisah, bukan kolom tambahan di `runs`: menambah kolom ke sheet yang
+# sudah berisi baris berarti judul lama tidak punya kolom itu, dan _worksheet()
+# hanya menulis judul ke sheet kosong.
+#
+# Satu baris per sinyal masuk. Mengukur jarak antara harga MODEL (open 00:00
+# UTC, yang dicatat shadow log dan dipakai backtest) dan harga yang tersedia
+# saat pesan benar-benar sampai -- cron 00:05 UTC di produksi jalan jam
+# 03:46-05:05 UTC. Tanpa sheet ini selisih itu tidak terukur sampai v1.4.5.
+ENTRIES_SHEET = "entries"
+ENTRIES_HEADER = ["sent_utc", "symbol", "signal_date", "entry_date",
+                  "model_entry_px", "px_at_send", "drift_pct", "lag_min",
+                  "oco_stop_loss", "oco_take_profit", "size_frac_used", "sent_ok"]
+
 # Status HTTP yang artinya "coba lagi nanti", bukan "konfigurasimu salah".
 #   429              kuota per menit terlampaui
 #   500/502/503/504  backend Google sedang bermasalah
@@ -317,6 +330,27 @@ def append_shadow(rows: list[dict]) -> bool:
     book = _client()
     ws = _worksheet(book, SHADOW_SHEET, SHADOW_HEADER)
     _retry(f"tulis {len(data)} baris ke '{SHADOW_SHEET}'",
+           lambda: ws.append_rows(data, value_input_option="RAW"))
+    return True
+
+
+def append_entries(rows: list[dict]) -> bool:
+    """Catat waktu kirim + harga saat kirim tiap sinyal masuk (lihat ENTRIES_HEADER)."""
+    if not rows:
+        return True
+    data = _rows_to_lists(rows, ENTRIES_HEADER)
+    if is_dry_run():
+        print(f"--- GOOGLE SHEETS '{ENTRIES_SHEET}' (MODE KERING, tidak ditulis) ---")
+        print("  " + " | ".join(ENTRIES_HEADER))
+        for r in data:
+            print("  " + " | ".join("" if v == "" else
+                                    (f"{v:.6g}" if isinstance(v, float) else str(v))
+                                    for v in r))
+        print("-" * 70)
+        return True
+    book = _client()
+    ws = _worksheet(book, ENTRIES_SHEET, ENTRIES_HEADER)
+    _retry(f"tulis {len(data)} baris ke '{ENTRIES_SHEET}'",
            lambda: ws.append_rows(data, value_input_option="RAW"))
     return True
 
