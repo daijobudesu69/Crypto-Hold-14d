@@ -45,13 +45,20 @@ def yearly_table(trades: pd.DataFrame, closes: dict[str, pd.Series]) -> pd.DataF
         eq = g.cumprod()
         return float((eq / np.maximum(eq.cummax(), 1.0) - 1).min())
 
+    # SEMUA tahun di jendela, termasuk yang tanpa trade (uang diam = 0%) --
+    # kalau tidak, tahun sepi seperti 2026 hilang dari tabel dan terlihat lebih baik.
+    awal, akhir = pd.Timestamp(cfg.BACKTEST_START), pd.Timestamp(cfg.BACKTEST_END)
     rows = []
-    for y, g in t.groupby("year"):
-        r = {"tahun": str(y), "trade": len(g), "win_pct": 100 * (g["R_net"] > 0).mean(),
-             "sum_R": g["R_net"].sum(), "mean_R": g["R_net"].mean(),
+    for y in range(awal.year, akhir.year + 1):
+        g = t[t["year"] == y]
+        kosong = g.empty
+        r = {"tahun": str(y) + (" (s/d " + akhir.strftime("%d %b") + ")" if y == akhir.year else ""),
+             "trade": len(g),
+             "win_pct": np.nan if kosong else 100 * (g["R_net"] > 0).mean(),
+             "sum_R": g["R_net"].sum(), "mean_R": np.nan if kosong else g["R_net"].mean(),
              "model_3pctR_pct": 100 * (g["model"].prod() - 1),
              "portofolio_pct": 100 * (g["porto"].prod() - 1),
-             "maxdd_porto_pct": 100 * dd(g["porto"])}
+             "maxdd_porto_pct": 0.0 if kosong else 100 * dd(g["porto"])}
         for sym, c in closes.items():
             cy = c[c.index.year == y]
             # buy & hold dari close akhir tahun sebelumnya (atau close pertama)
@@ -60,7 +67,10 @@ def yearly_table(trades: pd.DataFrame, closes: dict[str, pd.Series]) -> pd.DataF
             r[f"bh_{sym}_pct"] = 100 * (cy.iloc[-1] / base - 1) if len(cy) else np.nan
         rows.append(r)
 
-    tahun = (t["exit_date"].max() - t["entry_date"].min()).days / 365.25
+    # CAGR atas jendela backtest PENUH, sama dengan jendela buy & hold di baris
+    # TOTAL. Memakai rentang trade pertama-terakhir membuang bulan-bulan tunai
+    # dan membuat strategi tampak lebih baik daripada pembandingnya.
+    tahun = (akhir - awal).days / 365.25
     tot = {"tahun": "TOTAL", "trade": len(t), "win_pct": 100 * (t["R_net"] > 0).mean(),
            "sum_R": t["R_net"].sum(), "mean_R": t["R_net"].mean(),
            "model_3pctR_pct": 100 * (t["model"].prod() - 1),
@@ -70,6 +80,8 @@ def yearly_table(trades: pd.DataFrame, closes: dict[str, pd.Series]) -> pd.DataF
         tot[f"bh_{sym}_pct"] = 100 * (c.iloc[-1] / c.iloc[0] - 1)
     rows.append(tot)
     out = pd.DataFrame(rows)
+    for sym, c in closes.items():
+        out.attrs[f"cagr_bh_{sym}_pct"] = 100 * ((c.iloc[-1] / c.iloc[0]) ** (1 / tahun) - 1)
     out.attrs["years"] = tahun
     out.attrs["cagr_model_pct"] = 100 * (t["model"].prod() ** (1 / tahun) - 1)
     out.attrs["cagr_porto_pct"] = 100 * (t["porto"].prod() ** (1 / tahun) - 1)
@@ -99,8 +111,10 @@ def to_markdown(tab: pd.DataFrame, n_trades: int, mean_r: float) -> str:
         + ("COCOK dengan gerbang v1.4.2" if cocok else "TIDAK COCOK dengan gerbang v1.4.2 — angka di bawah TIDAK sah"),
         "",
         f"CAGR model 3%R: {tab.attrs['cagr_model_pct']:+.1f}%/thn | "
-        f"CAGR portofolio (cap 100%): {tab.attrs['cagr_porto_pct']:+.1f}%/thn | "
-        f"rentang {tab.attrs['years']:.2f} thn",
+        f"CAGR portofolio (cap 100%): {tab.attrs['cagr_porto_pct']:+.1f}%/thn"
+        + "".join(f" | CAGR buy & hold {k[8:-4]}: {v:+.1f}%/thn"
+                  for k, v in tab.attrs.items() if k.startswith("cagr_bh_"))
+        + f" | rentang {tab.attrs['years']:.2f} thn",
         "",
         *lines,
         "",
